@@ -11,7 +11,8 @@ import {
 import { analyzeSeries, comparePeriods } from "./src/analysis.js";
 import { fetchVerifiedPowerData } from "./src/assistantClient.js";
 import { createAssistantChat } from "./src/assistantChat.js";
-import { buildCsv, openPrintableReport } from "./src/report.js";
+import { buildCsv } from "./src/report.js";
+import { openPrintableReport } from "./src/scientificReport.js";
 
 import { createAnalyticsCharts } from "./src/analyticsCharts.js";
 import { initNavigation, icon, toast } from "./src/ui.js";
@@ -361,7 +362,7 @@ function renderInvestigation() {
   );
   $("#chartEmpty").hidden = true;
   $("#timeChart").hidden = false;
-  ["downloadCsv", "printReport", "chartPng"].forEach(
+  ["downloadReport", "chartPng"].forEach(
     (id) => ($("#" + id).disabled = false),
   );
   setText(
@@ -617,6 +618,8 @@ function assistantContext() {
     variable: state.view?.parameterInfo || POWER_PARAMETERS[state.variable],
     startYear: state.filtered?.startYear ?? state.startYear,
     endYear: state.filtered?.endYear ?? state.endYear,
+    resolution: state.resolution,
+    chartType: $("#chartType").value,
     dataset: state.dataset,
     analysis: state.analysis,
   };
@@ -671,7 +674,14 @@ function initControls() {
   ["periodAStart", "periodAEnd", "periodBStart", "periodBEnd"].forEach((id) =>
     $(`#${id}`).addEventListener("change", renderPeriodComparison),
   );
-  $("#printReport").addEventListener("click", () => {
+  const exportDialog = $("#exportFormatDialog");
+  $("#downloadReport").addEventListener("click", () => {
+    if (!state.dataset || !state.analysis)
+      return alert("Load NASA POWER data before exporting a report.");
+    exportDialog.showModal();
+  });
+  $("#downloadPdf").addEventListener("click", () => {
+    exportDialog.close();
     if (!state.dataset || !state.analysis)
       return alert("Load NASA POWER data before exporting a report.");
     try {
@@ -681,6 +691,7 @@ function initControls() {
     }
   });
   $("#downloadCsv").addEventListener("click", () => {
+    exportDialog.close();
     if (!state.dataset)
       return alert("Load NASA POWER data before exporting CSV.");
     const blob = new Blob([buildCsv(assistantContext())], {
@@ -895,7 +906,14 @@ async function setExplorerMode(mode) {
   controller?.focus(state.location.lat, state.location.lng);
   controller?.resize();
 }
-async function initOneGlobe(canvasId, pauseId, resetId, loadingId, fallbackId) {
+async function initOneGlobe(
+  canvasId,
+  pauseId,
+  resetId,
+  loadingId,
+  fallbackId,
+  cinematic = false,
+) {
   const { createEarthGlobe } = await import("./src/earthGlobe.js");
   const controller = await createEarthGlobe({
     canvas: $("#" + canvasId),
@@ -907,18 +925,19 @@ async function initOneGlobe(canvasId, pauseId, resetId, loadingId, fallbackId) {
           name: "Custom point",
           province: "Globe selection",
           ...coords,
-          zoom: map.getZoom(),
+          zoom: map?.getZoom() || 8,
         },
-        true,
+        !document.body.classList.contains("landing-mode"),
       ),
     pauseButton: $("#" + pauseId),
     resetButton: $("#" + resetId),
     loading: loadingId ? $("#" + loadingId) : null,
     fallback: $("#" + fallbackId),
+    cinematic,
   });
   if (controller) {
     globes.push(controller);
-    controller.focus(state.location.lat, state.location.lng);
+    if (!cinematic) controller.focus(state.location.lat, state.location.lng);
   }
   return controller;
 }
@@ -933,6 +952,36 @@ renderDataInsights();
 renderDataExport();
 renderAbout();
 initNavigation();
+const enterApplication = (target = "#investigate") => {
+  document.body.classList.add("app-mode");
+  document.body.classList.remove("landing-mode");
+  document.body.classList.remove("app-menu-open");
+  const menu = $("#mobileMenu");
+  menu?.setAttribute("aria-expanded", "false");
+  requestAnimationFrame(() => {
+    if (location.hash !== target) history.replaceState(null, "", target);
+    document.querySelector(target)?.scrollIntoView({ behavior: "smooth" });
+    map?.invalidateSize({ pan: false });
+    globes[0]?.resize();
+  });
+};
+document.querySelectorAll("[data-enter-app]").forEach((link) =>
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    enterApplication(link.getAttribute("href") || "#investigate");
+  }),
+);
+document.querySelectorAll("[data-home]").forEach((link) =>
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    document.body.classList.remove("app-mode", "app-menu-open");
+    document.body.classList.add("landing-mode");
+    history.replaceState(null, "", location.pathname + location.search);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }),
+);
+if (location.hash && !["#explore", "#home"].includes(location.hash))
+  enterApplication(location.hash);
 initSelectors();
 initMap();
 initComparison();
@@ -947,4 +996,5 @@ initOneGlobe(
   "resetGlobe",
   "globeLoading",
   "globeFallback",
+  true,
 );
