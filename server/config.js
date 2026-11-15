@@ -26,6 +26,8 @@ export function loadServerConfig() {
         [
           "GEMINI_API_KEY",
           "GEMINI_MODEL",
+          "UPSTASH_REDIS_REST_URL",
+          "UPSTASH_REDIS_REST_TOKEN",
           "HOST",
           "PORT",
           "ALLOWED_ORIGIN",
@@ -46,6 +48,12 @@ export function loadServerConfig() {
   return {
     key: process.env.GEMINI_API_KEY || values.GEMINI_API_KEY || "",
     model,
+    redisUrl:
+      process.env.UPSTASH_REDIS_REST_URL || values.UPSTASH_REDIS_REST_URL || "",
+    redisToken:
+      process.env.UPSTASH_REDIS_REST_TOKEN ||
+      values.UPSTASH_REDIS_REST_TOKEN ||
+      "",
     host: process.env.HOST || values.HOST || "127.0.0.1",
     port: Number(process.env.PORT || values.PORT || 8787),
     origin: process.env.ALLOWED_ORIGIN || values.ALLOWED_ORIGIN || "",

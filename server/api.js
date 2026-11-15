@@ -12,6 +12,10 @@ import { validateChart, computeEvidence } from "./climateEvidence.js";
 import { generateGeminiAnswer, assembleGroundedAnswer } from "./gemini.js";
 import { loadServerConfig } from "./config.js";
 import { ApiError } from "./errors.js";
+import {
+  createAssistantStore,
+  StorageUnavailableError,
+} from "./storage.js";
 
 const TTL = 30 * 60 * 1000;
 const SUMMARY_QUESTION =
@@ -51,44 +55,53 @@ export function createAssistantApi({
   getConfig = loadServerConfig,
   now = Date.now,
   rateLimits = {},
+  store = createAssistantStore({ now }),
 } = {}) {
-  const sessions = new Map(),
-    datasets = new Map(),
-    rates = new Map();
-  let inflight = 0;
-  function prune() {
-    const time = now();
-    for (const [id, entry] of sessions)
-      if (entry.expiresAt <= time) sessions.delete(id);
-    for (const [id, entry] of datasets)
-      if (entry.expiresAt <= time || !sessions.has(entry.owner))
-        datasets.delete(id);
-    for (const [key, value] of rates)
-      if (time - value.at > 60000) rates.delete(key);
-  }
-  function rate(req, category, limit) {
-    const key = `${req.socket.remoteAddress || "unknown"}:${category}`,
-      time = now();
-    let entry = rates.get(key);
-    if (!entry || time - entry.at >= 60000) {
-      entry = { at: time, count: 0 };
-      rates.set(key, entry);
-    }
-    if (++entry.count > (rateLimits[category] ?? limit))
+  const storage = new Proxy(store, {
+    get(target, property) {
+      const original = target[property];
+      if (property === "health")
+        return async () => {
+          try {
+            return await original.call(target);
+          } catch {
+            return false;
+          }
+        };
+      if (typeof original !== "function") return original;
+      return async (...args) => {
+        try {
+          return await original.apply(target, args);
+        } catch (error) {
+          if (error instanceof StorageUnavailableError) throw error;
+          throw new StorageUnavailableError();
+        }
+      };
+    },
+  });
+  async function rate(req, category, limit) {
+    const isVercel = process.env.VERCEL === "1",
+      proxyAddress = isVercel
+        ? req.headers["x-vercel-forwarded-for"] ||
+          req.headers["x-forwarded-for"] ||
+          req.socket.remoteAddress
+        : req.socket.remoteAddress,
+      address = String(proxyAddress || "unknown").split(",")[0].trim(),
+      count = await storage.incrementRate(`${address}:${category}`, 60);
+    if (count > (rateLimits[category] ?? limit))
       throw new ApiError(
         429,
         "RATE_LIMIT",
         "Too many requests. Please wait a minute before trying again.",
       );
-    if (rates.size > 5000) rates.delete(rates.keys().next().value);
   }
-  function sessionFor(req) {
+  async function sessionFor(req) {
     const cookie = (req.headers.cookie || "")
       .split(";")
       .map((item) => item.trim())
       .find((item) => item.startsWith("terralens_session="));
     const id = cookie?.slice("terralens_session=".length),
-      session = sessions.get(id);
+      session = id ? await storage.getSession(id) : null;
     if (!session || session.expiresAt <= now())
       throw new ApiError(
         401,
@@ -122,7 +135,6 @@ export function createAssistantApi({
       return next?.();
     }
     try {
-      prune();
       const config = getConfig();
       const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
         .split(",")[0]
@@ -140,13 +152,20 @@ export function createAssistantApi({
           "ORIGIN",
           "This endpoint only accepts requests from TerraLens.",
         );
-      if (req.method === "GET" && pathname === "/api/assistant/status")
+      if (req.method === "GET" && pathname === "/api/assistant/status") {
+        let storageReady = false;
+        try {
+          storageReady = await storage.health();
+        } catch {}
         return send(res, 200, {
           success: true,
           status: "online",
           configured: Boolean(config.key),
           model: config.model,
+          storageConfigured: storageReady,
+          storageShared: Boolean(storage.shared),
         });
+      }
       if (req.method !== "POST")
         throw new ApiError(405, "METHOD", "Use POST for this endpoint.");
       const body = await readJson(req);
@@ -157,10 +176,10 @@ export function createAssistantApi({
             "INVALID_SESSION",
             "The session request must be empty.",
           );
-        rate(req, "session", 20);
+        await rate(req, "session", 20);
         let existing;
         try {
-          existing = sessionFor(req);
+          existing = await sessionFor(req);
         } catch {}
         if (existing)
           return send(res, 200, {
@@ -169,18 +188,12 @@ export function createAssistantApi({
             configured: Boolean(config.key),
             model: config.model,
           });
-        if (sessions.size >= 500)
-          throw new ApiError(
-            503,
-            "BUSY",
-            "The assistant is busy. Please try again shortly.",
-          );
         const id = randomBytes(32).toString("hex"),
           session = {
             csrf: randomBytes(24).toString("hex"),
             expiresAt: now() + TTL,
           };
-        sessions.set(id, session);
+        await storage.setSession(id, session, Math.ceil(TTL / 1000));
         const secure = req.socket.encrypted || expected.startsWith("https:");
         res.setHeader(
           "set-cookie",
@@ -193,7 +206,7 @@ export function createAssistantApi({
           model: config.model,
         });
       }
-      const session = sessionFor(req),
+      const session = await sessionFor(req),
         csrf = String(req.headers["x-terralens-csrf"] || "");
       if (
         !/^[a-f0-9]{48}$/.test(csrf) ||
@@ -224,24 +237,26 @@ export function createAssistantApi({
         } catch (error) {
           throw new ApiError(400, "INVALID_DATASET", error.message);
         }
-        rate(req, "datasets", 12);
+        await rate(req, "datasets", 12);
         const fingerprint = JSON.stringify([
           body.latitude,
           body.longitude,
           body.startYear,
           body.endYear,
         ]);
-        let record = [...datasets.values()].find(
-          (item) =>
-            item.owner === session.id && item.fingerprint === fingerprint,
-        );
+        let record;
+        for (const datasetId of await storage.getDatasetIds(session.id)) {
+          const candidate = await storage.getDataset(datasetId);
+          if (!candidate) {
+            await storage.removeDatasetId(session.id, datasetId);
+            continue;
+          }
+          if (candidate.owner === session.id && candidate.fingerprint === fingerprint) {
+            record = candidate;
+            break;
+          }
+        }
         if (!record) {
-          if (datasets.size >= 100)
-            throw new ApiError(
-              503,
-              "BUSY",
-              "The dataset cache is full. Please try again shortly.",
-            );
           let dataset;
           try {
             dataset = await fetchPower({ ...body, parameter: "T2M" });
@@ -252,10 +267,8 @@ export function createAssistantApi({
               "NASA POWER could not provide this location and period. Check the period, connection, and NASA service availability.",
             );
           }
-          const owned = [...datasets.values()].filter(
-            (item) => item.owner === session.id,
-          );
-          if (owned.length >= 5) datasets.delete(owned[0].id);
+          const owned = await storage.getDatasetIds(session.id);
+          if (owned.length >= 5) await storage.deleteDataset(owned[0]);
           record = {
             id: randomUUID(),
             owner: session.id,
@@ -266,7 +279,7 @@ export function createAssistantApi({
             histories: new Map(),
             answers: new Map(),
           };
-          datasets.set(record.id, record);
+          await storage.setDataset(record, Math.ceil(TTL / 1000));
         }
         return send(res, 200, {
           datasetId: record.id,
@@ -293,7 +306,7 @@ export function createAssistantApi({
           "INVALID_REQUEST",
           "The assistant request contains unsupported fields.",
         );
-      const record = datasets.get(body.datasetId);
+      const record = await storage.getDataset(body.datasetId);
       if (!record || record.owner !== session.id || record.expiresAt <= now())
         throw new ApiError(
           404,
@@ -303,9 +316,13 @@ export function createAssistantApi({
       if (pathname.endsWith("/clear")) {
         record.histories.clear();
         record.answers.clear();
+        await storage.setDataset(
+          record,
+          Math.max(1, Math.ceil((record.expiresAt - now()) / 1000)),
+        );
         return send(res, 200, { cleared: true });
       }
-      rate(req, "chat", 6);
+      await rate(req, "chat", 6);
       const mode = body.mode ?? "chat";
       if (!["chat", "summary"].includes(mode))
         throw new ApiError(
@@ -336,12 +353,6 @@ export function createAssistantApi({
           ...record.answers.get(cacheKey),
           cached: true,
         });
-      if (inflight >= 2 || record.busy)
-        throw new ApiError(
-          429,
-          "AI_BUSY",
-          "An AI answer is already being generated. Please wait for it to finish.",
-        );
       let facts = record.views.get(viewKey);
       if (!facts) {
         facts = computeEvidence(record.dataset, chart);
@@ -357,8 +368,17 @@ export function createAssistantApi({
           "CONTEXT_LIMIT",
           "Select a shorter chart period for this question.",
         );
-      inflight++;
-      record.busy = true;
+      await storage.setDataset(
+        record,
+        Math.max(1, Math.ceil((record.expiresAt - now()) / 1000)),
+      );
+      const generationToken = randomUUID();
+      if (!(await storage.acquireGeneration(record.id, generationToken, 2)))
+        throw new ApiError(
+          429,
+          "AI_BUSY",
+          "An AI answer is already being generated. Please wait for it to finish.",
+        );
       try {
         const generated = await generate({
           config,
@@ -397,13 +417,17 @@ export function createAssistantApi({
             `chat:${viewKey}:${question.trim()}:${historyHash(updatedHistory)}`,
             result,
           );
+        await storage.setDataset(
+          record,
+          Math.max(1, Math.ceil((record.expiresAt - now()) / 1000)),
+        );
         return send(res, 200, result);
       } finally {
-        inflight--;
-        record.busy = false;
+        await storage.releaseGeneration(record.id, generationToken);
       }
     } catch (error) {
-      const known = error instanceof ApiError;
+      const storageFailure = error instanceof StorageUnavailableError;
+      const known = error instanceof ApiError || storageFailure;
       send(res, known ? error.status : 500, {
         error: {
           code: known ? error.code : "INTERNAL",

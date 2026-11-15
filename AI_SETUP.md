@@ -2,11 +2,27 @@ TerraLens AI runs on the server. The Gemini key never belongs in a `VITE_` varia
 
 ## Deploy on Vercel
 
-The project includes a catch-all Vercel function at `api/[...path].js` for the assistant API. In the Vercel project settings, add `GEMINI_API_KEY` as an encrypted environment variable for the Production environment (and Preview if you use preview deployments), then redeploy. Optionally set `GEMINI_MODEL`; the default is `gemini-3.1-flash-lite`. Do not use a `VITE_` prefix. Vercel builds the frontend into `dist/` and serves `/api/*` through the Node function.
+The project includes a catch-all Vercel function at `api/[...path].js` for the assistant API. In the Vercel project settings, add `GEMINI_API_KEY`, `UPSTASH_REDIS_REST_URL`, and `UPSTASH_REDIS_REST_TOKEN` as encrypted environment variables for Production (and Preview if you use preview deployments), then redeploy. Create a Redis database in Upstash and copy its REST URL and token from the database console. Optionally set `GEMINI_MODEL`; the default is `gemini-3.1-flash-lite`. Never use a `VITE_` prefix for secrets. Vercel builds the frontend into `dist/` and serves `/api/*` through the Node function. Confirm the Vercel project's Root Directory points to this repository root, where both `api/` and `vercel.json` live.
 
-The function detects the HTTPS origin from Vercel's forwarded request headers, so `ALLOWED_ORIGIN` is normally unnecessary. If you set it, use the exact deployed origin, including `https://` and no trailing slash. The session and verified-dataset cache is in function memory and expires after thirty minutes; a function restart or a request routed to a different instance can require the user to reload and fetch the NASA dataset again. For deployments that need reliable multi-instance sessions, move this state to shared storage before enabling substantial traffic.
+The function detects the HTTPS origin from Vercel's forwarded request headers, so `ALLOWED_ORIGIN` is normally unnecessary. If you set it, use the exact deployed origin, including `https://` and no trailing slash. Sessions, CSRF tokens, verified NASA datasets, chat history, answer caches, rate limits, and generation locks are stored in Redis with expiry. Local Node use falls back to in-memory storage when the Upstash variables are absent; the Vercel function requires shared Redis and reports storage health separately from Gemini key configuration.
 
-After deploying these project changes, open `https://your-deployment.vercel.app/api/assistant/status`. A JSON response with `"configured": true` means the API function is deployed and sees `GEMINI_API_KEY`; `"configured": false` means the Vercel environment variable is missing from that deployment environment. A Vercel 404 or non-JSON page means the function file was not included in the deployment. Adding the key in Vercel does not deploy local code changes: commit and push `api/[...path].js`, `vercel.json`, and the related server changes, then redeploy.
+After deploying these project changes, open `https://your-deployment.vercel.app/api/assistant/status`. A JSON response with `"status": "online"`, `"configured": true`, and `"storageConfigured": true` means the function can see the Gemini key and reach Redis. `"configured": false` means the Vercel environment is missing `GEMINI_API_KEY`; `"storageConfigured": false` means the Upstash variables are missing or Redis is unreachable. A Vercel 404 means that deployment did not build the root `api/` function (check Root Directory and deploy the latest commit). Adding environment variables alone does not publish local code changes: commit and push the API, storage, and Vercel config changes, then redeploy.
+
+Smoke-test the deployed status and the full session → NASA dataset → Gemini flow in PowerShell:
+
+```powershell
+curl.exe -i https://terralens-zeta.vercel.app/api/assistant/status
+$base = "https://terralens-zeta.vercel.app"
+$web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+$session = Invoke-RestMethod -Method Post -Uri "$base/api/assistant/session" -ContentType "application/json" -Body "{}" -WebSession $web
+$headers = @{ "x-terralens-csrf" = $session.csrf }
+$dataset = Invoke-RestMethod -Method Post -Uri "$base/api/datasets" -ContentType "application/json" -Headers $headers -Body '{"latitude":14.5,"longitude":121,"startYear":2020,"endYear":2022,"parameter":"T2M"}' -WebSession $web
+$chat = @{ datasetId = $dataset.datasetId; question = "Summarize the verified temperature pattern."; chart = @{ type = "line"; parameter = "T2M"; resolution = "yearly"; startYear = 2020; endYear = 2022; grouping = "months" }; mode = "chat" } | ConvertTo-Json -Depth 6 -Compress
+$answer = Invoke-RestMethod -Method Post -Uri "$base/api/assistant/chat" -ContentType "application/json" -Headers $headers -Body $chat -WebSession $web
+$answer | Select-Object model, generatedAt, answer
+```
+
+`WebRequestSession` keeps the HttpOnly session cookie between requests, and the script sends the returned CSRF token on state-changing calls. Do not save real tokens or dataset responses in source control.
 
 Use Node 22 or newer. `npm run dev` starts Vite and the assistant API together. For production, run `npm run build` followed by `npm start`; open `http://127.0.0.1:8787`. `npm run preview` also includes the API for local verification.
 
@@ -16,7 +32,7 @@ Set `GEMINI_API_KEY` and optionally `GEMINI_MODEL` in the server environment. Th
 - Linux/macOS: `~/.config/terralens/server.env`
 - Custom location: set `TERRALENS_ENV_FILE` in the server process environment.
 
-The private file is read for each API request, so changing its key does not require a restart. Process environment variables take precedence. Do not copy a real key into the project's `.env.example`.
+The private file is read for each API request, so changing its key does not require a restart. Process environment variables take precedence. Keep both Upstash credentials and the Gemini key out of source control and `.env.example`; the example file contains blank placeholders only.
 
 Static hosting alone cannot run Gemini securely. For Apache, serve `dist/` and reverse-proxy the application's `/api/` requests to the Node server. For an installation at `/Terralens/`, a virtual-host configuration can include:
 

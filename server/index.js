@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssistantApi } from "./api.js";
 import { loadServerConfig } from "./config.js";
+import { createAssistantStore } from "./storage.js";
 
 const root = fileURLToPath(new URL("../dist/", import.meta.url));
 const types = {
@@ -15,7 +16,8 @@ const types = {
   ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
 };
-const api = createAssistantApi();
+const config = loadServerConfig();
+const api = createAssistantApi({ store: createAssistantStore({ config }) });
 export const server = http.createServer((req, res) => {
   api(req, res, async () => {
     try {
@@ -65,7 +67,6 @@ export const server = http.createServer((req, res) => {
 });
 server.requestTimeout = 15000;
 server.headersTimeout = 10000;
-const config = loadServerConfig();
 server.listen(config.port, config.host, () =>
   console.log(
     `TerraLens: http://${config.host}:${config.port} (Gemini ${config.key ? "configured" : "not configured"})`,

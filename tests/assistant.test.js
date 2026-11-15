@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { createAssistantApi } from "../server/api.js";
+import {
+  createAssistantStore,
+  MemoryAssistantStore,
+  RedisAssistantStore,
+} from "../server/storage.js";
 import { computeEvidence, validateChart } from "../server/climateEvidence.js";
 import {
   assembleGroundedAnswer,
@@ -101,8 +106,8 @@ async function harness(t, options = {}) {
     });
     return { status: response.status, data: await response.json(), response };
   }
-  async function client() {
-    let cookie, csrf;
+  async function client(credentials) {
+    let cookie = credentials?.cookie, csrf = credentials?.csrf;
     async function post(route, body, headers = {}) {
       const response = await fetch(base + route, {
         method: "POST",
@@ -118,10 +123,12 @@ async function harness(t, options = {}) {
       const data = await response.json();
       return { status: response.status, data, response };
     }
-    const session = await post("/api/assistant/session", {});
-    cookie = session.response.headers.get("set-cookie").split(";")[0];
+    const session = credentials
+      ? { data: { csrf } }
+      : await post("/api/assistant/session", {});
+    if (!credentials) cookie = session.response.headers.get("set-cookie").split(";")[0];
     csrf = session.data.csrf;
-    return { post, session: session.data };
+    return { post, session: session.data, cookie, csrf };
   }
   return { base, client, get };
 }
@@ -134,6 +141,10 @@ test("health endpoint reports API availability separately from Gemini configurat
     status: "online",
     configured: true,
     model: "gemini-test",
+    storageConfigured: true,
+    storageShared: false,
+    storageConfigured: true,
+    storageShared: false,
   });
 
   const missingKey = await harness(t, {
@@ -170,6 +181,144 @@ test("server computes yearly extremes, weighted means and missing-data limitatio
   assert.match(byId["PRECTOTCORR.year.2020"], /unavailable.*incomplete/);
   assert.match(byId["PRECTOTCORR.total"], /partial total/);
   assert.match(byId["T2M.annualTrend"], /Mann-Kendall/);
+});
+test("sessions, datasets, and chat history survive separate API instances with shared storage", async (t) => {
+  const store = new MemoryAssistantStore(),
+    firstInstance = await harness(t, { store }),
+    secondInstance = await harness(t, { store }),
+    firstClient = await firstInstance.client(),
+    dataset = await firstClient.post("/api/datasets", {
+      latitude: 14.5,
+      longitude: 121,
+      startYear: 2020,
+      endYear: 2022,
+    });
+  assert.equal(dataset.status, 200);
+
+  const nextInvocation = await secondInstance.client({
+      cookie: firstClient.cookie,
+      csrf: firstClient.csrf,
+    }),
+    response = await nextInvocation.post("/api/assistant/chat", {
+      datasetId: dataset.data.datasetId,
+      question: "Which year was hottest?",
+      chart,
+    });
+  assert.equal(response.status, 200);
+  assert.match(response.data.answer, /2022/);
+
+  const laterInvocation = await firstInstance.client({
+      cookie: firstClient.cookie,
+      csrf: firstClient.csrf,
+    }),
+    followup = await laterInvocation.post("/api/assistant/chat", {
+      datasetId: dataset.data.datasetId,
+      question: "What does that pattern mean?",
+      chart,
+    });
+  assert.equal(followup.status, 200);
+});
+test("Vercel shared-storage adapter persists records across independent Redis clients", async () => {
+  const database = new Map(),
+    sets = new Map(),
+    counters = new Map(),
+    locks = new Map(),
+    slots = new Map();
+  function fakeRedis() {
+    return {
+      async ping() {
+        return "PONG";
+      },
+      async get(key) {
+        return database.get(key) ?? null;
+      },
+      async set(key, value, options = {}) {
+        if (options.nx && database.has(key)) return null;
+        database.set(key, value);
+        return "OK";
+      },
+      async del(key) {
+        return Number(database.delete(key));
+      },
+      async sadd(key, value) {
+        if (!sets.has(key)) sets.set(key, new Set());
+        sets.get(key).add(value);
+        return 1;
+      },
+      async expire() {
+        return 1;
+      },
+      async smembers(key) {
+        return [...(sets.get(key) || [])];
+      },
+      async srem(key, value) {
+        return Number(sets.get(key)?.delete(value) || false);
+      },
+      async incr(key) {
+        const value = (counters.get(key) || 0) + 1;
+        counters.set(key, value);
+        return value;
+      },
+      async eval(script, keys, args) {
+        if (script.includes("ZREMRANGEBYSCORE")) {
+          const [globalKey, lockKey] = keys,
+            [time, ttl, token, limit] = args;
+          for (const [id, expiresAt] of slots)
+            if (expiresAt <= time) slots.delete(id);
+          if (locks.has(lockKey) || slots.size >= limit) return 0;
+          locks.set(lockKey, token);
+          slots.set(token, time + ttl);
+          return 1;
+        }
+        const [globalKey, lockKey] = keys,
+          [token] = args;
+        if (locks.get(lockKey) === token) locks.delete(lockKey);
+        slots.delete(token);
+        return 1;
+      },
+    };
+  }
+  const first = new RedisAssistantStore(fakeRedis()),
+    second = new RedisAssistantStore(fakeRedis()),
+    session = { csrf: "a".repeat(48), expiresAt: Date.now() + 30_000 },
+    dataset = {
+      id: "dataset-id",
+      owner: "session-id",
+      fingerprint: "coords-period",
+      expiresAt: Date.now() + 30_000,
+      dataset: fixture(),
+      views: new Map([["chart", [{ id: "fact", text: "verified" }]]]),
+      histories: new Map([["chart", [{ role: "user", text: "hello" }]]]),
+      answers: new Map([["cache", { answer: "stored" }]]),
+    };
+  await first.setSession("session-id", session, 30);
+  await first.setDataset(dataset, 30);
+  assert.deepEqual(await second.getSession("session-id"), session);
+  const restored = await second.getDataset("dataset-id");
+  assert.deepEqual(restored.views.get("chart"), [{ id: "fact", text: "verified" }]);
+  assert.deepEqual(restored.histories.get("chart"), [{ role: "user", text: "hello" }]);
+  assert.deepEqual(restored.answers.get("cache"), { answer: "stored" });
+  assert.deepEqual(await second.getDatasetIds("session-id"), ["dataset-id"]);
+  assert.equal(await first.incrementRate("client:chat", 60), 1);
+  assert.equal(await second.incrementRate("client:chat", 60), 2);
+  assert.equal(await first.acquireGeneration("dataset-id", "lock-a", 2), true);
+  assert.equal(await second.acquireGeneration("dataset-id", "lock-b", 2), false);
+  await first.releaseGeneration("dataset-id", "lock-a");
+  assert.equal(await second.acquireGeneration("dataset-id", "lock-c", 2), true);
+});
+test("Vercel storage reports missing shared Redis configuration without falling back to process memory", async (t) => {
+  const store = createAssistantStore({ env: {}, requireShared: true }),
+    h = await harness(t, { store }),
+    status = await h.get("/api/assistant/status"),
+    response = await fetch(`${h.base}/api/assistant/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: h.base },
+      body: "{}",
+    });
+  assert.equal(status.data.storageConfigured, false);
+  assert.equal(status.data.storageShared, false);
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, "STORAGE_UNAVAILABLE");
 });
 test("chart context rejects client measurements and periods outside the verified dataset", () => {
   assert.throws(
