@@ -725,6 +725,8 @@ h3 {
   align-items: stretch;
 }
 .control-panel {
+  position: relative;
+  z-index: 450;
   padding: 21px;
   display: flex;
   flex-direction: column;
@@ -798,6 +800,53 @@ select option {
   font-variant-numeric: tabular-nums;
   font-size: 14px;
   color: #b2d3dd;
+}
+.location-search {
+  position: relative;
+  min-width: 0;
+}
+.location-search > label {
+  display: block;
+  margin-bottom: 6px;
+  color: #7895a9;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.location-suggestions {
+  position: absolute;
+  z-index: 1200;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  border: 1px solid #81adc344;
+  border-radius: 6px;
+  background: #0c1929;
+  box-shadow: 0 10px 26px #0008;
+}
+.location-suggestion,
+.location-suggestion-message {
+  padding: 9px 10px;
+  border-radius: 4px;
+  color: #c0d4e1;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.location-suggestion { cursor: pointer; }
+.location-suggestion:hover,
+.location-suggestion.active { background: #193344; color: #86e3e5; }
+.location-suggestion-message { color: #7895a9; }
+.location-search-credit {
+  display: block;
+  margin-top: 5px;
+  color: #6d8496;
+  font-size: 10px;
+  line-height: 1.4;
 }
 .map-shell {
   overflow: hidden;

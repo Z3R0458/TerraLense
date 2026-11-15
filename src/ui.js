@@ -108,6 +108,12 @@ export function initNavigation() {
     }
     if (!activeSection) return;
 
+    if (
+      document.body.classList.contains("app-mode") &&
+      location.hash !== `#${activeSection.id}`
+    )
+      history.replaceState(null, "", `#${activeSection.id}`);
+
     links.forEach((link) => {
       const active =
         link.hash === `#${activeSection.id}` && link.hasAttribute("data-section");

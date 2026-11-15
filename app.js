@@ -31,6 +31,8 @@ import {
   filterDataset,
 } from "./src/climateData.js";
 
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+
 const state = {
   location: DEFAULT_LOCATION,
   variable: "T2M",
@@ -92,9 +94,7 @@ function syncStatus() {
 
 function setLocation(location, moveMap = false) {
   state.location = location;
-  $("#locationSelect").value = LOCATIONS.some((item) => item.id === location.id)
-    ? location.id
-    : "custom";
+  $("#locationSearch").value = location.displayName || location.name || "Custom map point";
   marker?.setLatLng([location.lat, location.lng]);
   if (moveMap && map) {
     if (
@@ -111,6 +111,143 @@ function setLocation(location, moveMap = false) {
   syncStatus();
 }
 
+function initLocationSearch() {
+  const input = $("#locationSearch");
+  const list = $("#locationSuggestions");
+  let debounceTimer;
+  let controller;
+  let results = [];
+  let activeIndex = -1;
+  input.value = "";
+
+  const close = () => {
+    clearTimeout(debounceTimer);
+    controller?.abort();
+    results = [];
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    activeIndex = -1;
+  };
+  const showMessage = (message) => {
+    activeIndex = -1;
+    input.removeAttribute("aria-activedescendant");
+    list.replaceChildren();
+    const item = document.createElement("li");
+    item.className = "location-suggestion-message";
+    item.setAttribute("role", "presentation");
+    item.textContent = message;
+    list.append(item);
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  };
+  const selectResult = (feature) => {
+    const [lng, lat] = feature.geometry.coordinates;
+    const properties = feature.properties;
+    const displayName = [
+      properties.name,
+      properties.city,
+      properties.state,
+      properties.country,
+    ].filter((part, index, parts) => part && parts.indexOf(part) === index).join(", ");
+    const placeType = properties.osm_value || properties.type;
+    const zoom = ({ continent: 3, country: 5, state: 7, province: 7, county: 9, city: 11, town: 12, village: 13 })[placeType] || 12;
+    controller?.abort();
+    setLocation({
+      id: "custom",
+      name: displayName || "Selected place",
+      displayName: displayName || "Selected place",
+      province: properties.state || properties.country || "User-selected",
+      lat,
+      lng,
+      zoom,
+    }, true);
+    close();
+  };
+  const renderResults = (features) => {
+    results = features;
+    activeIndex = -1;
+    input.removeAttribute("aria-activedescendant");
+    list.replaceChildren();
+    if (!features.length) {
+      showMessage("No places found. Try a nearby city or region.");
+      return;
+    }
+    features.forEach((feature, index) => {
+      const properties = feature.properties;
+      const item = document.createElement("li");
+      item.id = `location-suggestion-${index}`;
+      item.className = "location-suggestion";
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", "false");
+      item.textContent = [properties.name, properties.city, properties.state, properties.country]
+        .filter((part, partIndex, parts) => part && parts.indexOf(part) === partIndex)
+        .join(", ");
+      item.addEventListener("mousedown", (event) => event.preventDefault());
+      item.addEventListener("click", () => selectResult(feature));
+      list.append(item);
+    });
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  };
+  const search = () => {
+    clearTimeout(debounceTimer);
+    const query = input.value.trim();
+    controller?.abort();
+    results = [];
+    if (query.length < 2) {
+      results = [];
+      showMessage("Type at least 2 characters to search places.");
+      return;
+    }
+    showMessage("Searching places near the map view…");
+    debounceTimer = setTimeout(async () => {
+      const center = map?.getCenter();
+      controller = new AbortController();
+      const params = new URLSearchParams({ q: query, limit: "6" });
+      if (center) {
+        params.set("lat", String(center.lat));
+        params.set("lon", String(center.lng));
+        params.set("zoom", String(map.getZoom()));
+      }
+      try {
+        const response = await fetch(`https://photon.komoot.io/api/?${params}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Place search failed (${response.status})`);
+        const data = await response.json();
+        if (input.value.trim() === query) renderResults(data.features || []);
+      } catch (error) {
+        if (error.name !== "AbortError" && input.value.trim() === query)
+          showMessage("Place search is unavailable. Try again shortly.");
+      }
+    }, 250);
+  };
+
+  input.addEventListener("input", search);
+  input.addEventListener("keydown", (event) => {
+    const options = [...list.querySelectorAll('[role="option"]')];
+    if (event.key === "Escape") {
+      close();
+    } else if (options.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      activeIndex = activeIndex < 0
+        ? direction > 0 ? 0 : options.length - 1
+        : (activeIndex + direction + options.length) % options.length;
+      options.forEach((option, index) => {
+        option.classList.toggle("active", index === activeIndex);
+        option.setAttribute("aria-selected", String(index === activeIndex));
+      });
+      input.setAttribute("aria-activedescendant", options[activeIndex].id);
+    } else if (event.key === "Enter" && !list.hidden && results.length) {
+      event.preventDefault();
+      selectResult(results[activeIndex < 0 ? 0 : activeIndex]);
+    }
+  });
+  input.addEventListener("blur", () => setTimeout(close, 150));
+}
+
 function initSelectors() {
   $("#variableSelect").replaceChildren();
   for (const info of Object.values(POWER_PARAMETERS)) {
@@ -122,22 +259,7 @@ function initSelectors() {
   document
     .querySelectorAll('input[max="2025"]')
     .forEach((input) => (input.max = new Date().getUTCFullYear() - 1));
-  LOCATIONS.forEach((location) => {
-    const option = document.createElement("option");
-    option.value = location.id;
-    option.textContent = `${location.name}, ${location.province}`;
-    $("#locationSelect").append(option);
-  });
-  $("#locationSelect").add(new Option("Custom map point", "custom"));
-  $("#locationSelect").value = state.location.id;
-  $("#locationSelect").addEventListener("change", (event) => {
-    if (event.target.value !== "custom")
-      setLocation(
-        LOCATIONS.find((item) => item.id === event.target.value) ||
-          DEFAULT_LOCATION,
-        true,
-      );
-  });
+  initLocationSearch();
   ["variableSelect", "chartParameter"].forEach((id) =>
     $("#" + id).addEventListener("change", (event) => {
       state.variable = event.target.value;
@@ -952,7 +1074,7 @@ renderDataInsights();
 renderDataExport();
 renderAbout();
 initNavigation();
-const enterApplication = (target = "#investigate") => {
+const enterApplication = (target = "#investigate", smooth = true) => {
   document.body.classList.add("app-mode");
   document.body.classList.remove("landing-mode");
   document.body.classList.remove("app-menu-open");
@@ -960,7 +1082,9 @@ const enterApplication = (target = "#investigate") => {
   menu?.setAttribute("aria-expanded", "false");
   requestAnimationFrame(() => {
     if (location.hash !== target) history.replaceState(null, "", target);
-    document.querySelector(target)?.scrollIntoView({ behavior: "smooth" });
+    document.querySelector(target)?.scrollIntoView({
+      behavior: smooth ? "smooth" : "instant",
+    });
     map?.invalidateSize({ pan: false });
     globes[0]?.resize();
   });
@@ -980,8 +1104,12 @@ document.querySelectorAll("[data-home]").forEach((link) =>
     window.scrollTo({ top: 0, behavior: "smooth" });
   }),
 );
-if (location.hash && !["#explore", "#home"].includes(location.hash))
-  enterApplication(location.hash);
+if (
+  location.hash &&
+  !["#explore", "#home"].includes(location.hash) &&
+  document.querySelector(location.hash)
+)
+  enterApplication(location.hash, false);
 initSelectors();
 initMap();
 initComparison();
