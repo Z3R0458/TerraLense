@@ -232,7 +232,11 @@ export function createAssistantChat() {
     } catch (error) {
       configured = false;
       $("#aiProvider").textContent =
-        attempt < 4 ? "AI server unavailable — retrying" : "AI backend offline";
+        error.code === "AI_NOT_CONFIGURED"
+          ? "Gemini not configured"
+          : attempt < 4
+            ? "AI server unavailable — retrying"
+            : "AI backend offline";
       $("#aiProvider").title = error.message;
       availability();
       suggestions();
