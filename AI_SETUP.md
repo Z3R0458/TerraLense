@@ -1,5 +1,13 @@
 TerraLens AI runs on the server. The Gemini key never belongs in a `VITE_` variable, browser storage, source file, or `dist/`.
 
+## Deploy on Vercel
+
+The project includes a catch-all Vercel function at `api/[...path].js` for the assistant API. In the Vercel project settings, add `GEMINI_API_KEY` as an encrypted environment variable for the Production environment (and Preview if you use preview deployments), then redeploy. Optionally set `GEMINI_MODEL`; the default is `gemini-3.1-flash-lite`. Do not use a `VITE_` prefix. Vercel builds the frontend into `dist/` and serves `/api/*` through the Node function.
+
+The function detects the HTTPS origin from Vercel's forwarded request headers, so `ALLOWED_ORIGIN` is normally unnecessary. If you set it, use the exact deployed origin, including `https://` and no trailing slash. The session and verified-dataset cache is in function memory and expires after thirty minutes; a function restart or a request routed to a different instance can require the user to reload and fetch the NASA dataset again. For deployments that need reliable multi-instance sessions, move this state to shared storage before enabling substantial traffic.
+
+After deploying these project changes, open `https://your-deployment.vercel.app/api/assistant/status`. A JSON response with `"configured": true` means the API function is deployed and sees `GEMINI_API_KEY`; `"configured": false` means the Vercel environment variable is missing from that deployment environment. A Vercel 404 or non-JSON page means the function file was not included in the deployment. Adding the key in Vercel does not deploy local code changes: commit and push `api/[...path].js`, `vercel.json`, and the related server changes, then redeploy.
+
 Use Node 22 or newer. `npm run dev` starts Vite and the assistant API together. For production, run `npm run build` followed by `npm start`; open `http://127.0.0.1:8787`. `npm run preview` also includes the API for local verification.
 
 Set `GEMINI_API_KEY` and optionally `GEMINI_MODEL` in the server environment. The default model is `gemini-3.1-flash-lite`. Alternatively, place the variables from `.env.example` in a private file outside the web root:

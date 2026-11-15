@@ -124,9 +124,13 @@ export function createAssistantApi({
     try {
       prune();
       const config = getConfig();
+      const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
+        .split(",")[0]
+        .trim();
+      const requestProtocol =
+        forwardedProto === "https" || req.socket.encrypted ? "https" : "http";
       const expected =
-        config.origin ||
-        `${req.socket.encrypted ? "https" : "http"}://${req.headers.host}`;
+        config.origin || `${requestProtocol}://${req.headers.host}`;
       if (
         req.headers["sec-fetch-site"] === "cross-site" ||
         (req.headers.origin && req.headers.origin !== expected)
