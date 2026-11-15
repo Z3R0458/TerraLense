@@ -13,6 +13,26 @@ function node(tag, className, text) {
   if (text !== undefined) item.textContent = text;
   return item;
 }
+function requestHistory(items) {
+  let remaining = 8000;
+  return items
+    .slice(0, -1)
+    .slice(-8)
+    .reverse()
+    .flatMap((message) => {
+      if (
+        !message ||
+        !["user", "assistant"].includes(message.role) ||
+        typeof message.text !== "string" ||
+        remaining <= 0
+      )
+        return [];
+      const text = message.text.slice(0, Math.min(2000, remaining));
+      remaining -= text.length;
+      return [{ role: message.role, text }];
+    })
+    .reverse();
+}
 export function createAssistantChat() {
   let context = null,
     stale = false,
@@ -133,7 +153,7 @@ export function createAssistantChat() {
     availability();
     suggestions();
     try {
-      const history = items.slice(0, -1).slice(-8);
+      const history = requestHistory(items);
       const response = await askAssistant({
         datasetId: id,
         question,

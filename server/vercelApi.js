@@ -143,20 +143,21 @@ function validateHistory(history) {
   if (history === undefined) return [];
   if (!Array.isArray(history) || history.length > MAX_HISTORY_MESSAGES)
     throw new ApiError(400, "INVALID_HISTORY", "Chat history is too long.");
-  let total = 0;
-  for (const message of history) {
+  let remaining = 8000;
+  const normalized = [];
+  for (const message of history.slice(-MAX_HISTORY_MESSAGES)) {
     if (
       !message ||
       !["user", "assistant"].includes(message.role) ||
-      typeof message.text !== "string" ||
-      message.text.length > 2000
+      typeof message.text !== "string"
     )
       throw new ApiError(400, "INVALID_HISTORY", "Chat history is invalid.");
-    total += message.text.length;
+    if (remaining <= 0) break;
+    const text = message.text.slice(0, Math.min(2000, remaining));
+    remaining -= text.length;
+    normalized.push({ role: message.role, text });
   }
-  if (total > 8000)
-    throw new ApiError(400, "INVALID_HISTORY", "Chat history is too long.");
-  return history;
+  return normalized;
 }
 
 export function createVercelApiRoute(pathname, dependencies = {}) {
