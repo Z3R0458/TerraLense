@@ -7,6 +7,7 @@ import {
   MemoryAssistantStore,
   RedisAssistantStore,
 } from "../server/storage.js";
+import { createVercelApiRoute } from "../server/vercelApi.js";
 import { computeEvidence, validateChart } from "../server/climateEvidence.js";
 import {
   assembleGroundedAnswer,
@@ -319,6 +320,24 @@ test("Vercel storage reports missing shared Redis configuration without falling 
   assert.equal(status.data.storageShared, false);
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error.code, "STORAGE_UNAVAILABLE");
+});
+test("explicit Vercel endpoint handler dispatches its mapped health path", async (t) => {
+  const server = http.createServer(
+    createVercelApiRoute("/api/assistant/status"),
+  );
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const base = `http://127.0.0.1:${server.address().port}`,
+    response = await fetch(`${base}/route-placeholder?probe=1`, {
+      headers: { origin: base },
+    }),
+    body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.status, "online");
+  assert.equal(typeof body.configured, "boolean");
 });
 test("chart context rejects client measurements and periods outside the verified dataset", () => {
   assert.throws(
