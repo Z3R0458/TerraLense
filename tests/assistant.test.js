@@ -95,6 +95,12 @@ async function harness(t, options = {}) {
     server.close();
   });
   const base = `http://127.0.0.1:${server.address().port}`;
+  async function get(route, headers = {}) {
+    const response = await fetch(base + route, {
+      headers: { origin: base, ...headers },
+    });
+    return { status: response.status, data: await response.json(), response };
+  }
   async function client() {
     let cookie, csrf;
     async function post(route, body, headers = {}) {
@@ -117,8 +123,44 @@ async function harness(t, options = {}) {
     csrf = session.data.csrf;
     return { post, session: session.data };
   }
-  return { base, client };
+  return { base, client, get };
 }
+test("health endpoint reports API availability separately from Gemini configuration", async (t) => {
+  const configured = await harness(t),
+    configuredHealth = await configured.get("/api/assistant/status");
+  assert.equal(configuredHealth.status, 200);
+  assert.deepEqual(configuredHealth.data, {
+    success: true,
+    status: "online",
+    configured: true,
+    model: "gemini-test",
+  });
+
+  const missingKey = await harness(t, {
+      getConfig: () => ({ key: "", model: "gemini-test", origin: "" }),
+      generate: generateGeminiAnswer,
+    }),
+    unavailableHealth = await missingKey.get("/api/assistant/status");
+  assert.equal(unavailableHealth.status, 200);
+  assert.equal(unavailableHealth.data.status, "online");
+  assert.equal(unavailableHealth.data.configured, false);
+
+  const client = await missingKey.client(),
+    dataset = await client.post("/api/datasets", {
+      latitude: 14.5,
+      longitude: 121,
+      startYear: 2020,
+      endYear: 2022,
+    }),
+    chat = await client.post("/api/assistant/chat", {
+      datasetId: dataset.data.datasetId,
+      question: "Which year was hottest?",
+      chart,
+    });
+  assert.equal(chat.status, 503);
+  assert.equal(chat.data.error.code, "AI_NOT_CONFIGURED");
+  assert.doesNotMatch(JSON.stringify(chat.data), /test-secret|private-test-key/);
+});
 test("server computes yearly extremes, weighted means and missing-data limitations", () => {
   const dataset = fixture();
   dataset.series.PRECTOTCORR.observations[0].value = null;

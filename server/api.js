@@ -142,6 +142,8 @@ export function createAssistantApi({
         );
       if (req.method === "GET" && pathname === "/api/assistant/status")
         return send(res, 200, {
+          success: true,
+          status: "online",
           configured: Boolean(config.key),
           model: config.model,
         });
