@@ -339,6 +339,91 @@ test("explicit Vercel endpoint handler dispatches its mapped health path", async
   assert.equal(body.status, "online");
   assert.equal(typeof body.configured, "boolean");
 });
+test("Vercel stateless endpoints share signed session and dataset tokens without Redis", async (t) => {
+  let nasaFetches = 0,
+    receivedHistory;
+  const dependencies = {
+      getConfig: () => ({ key: "stateless-test-secret", model: "gemini-test", origin: "" }),
+      fetchPower: async (request) => {
+        nasaFetches++;
+        return fixture(request);
+      },
+      generate: async ({ history }) => {
+        receivedHistory = history;
+        return grounded();
+      },
+    },
+    routes = new Map([
+      ["/api/assistant/status", createVercelApiRoute("/api/assistant/status", dependencies)],
+      ["/api/assistant/session", createVercelApiRoute("/api/assistant/session", dependencies)],
+      ["/api/datasets", createVercelApiRoute("/api/datasets", dependencies)],
+      ["/api/assistant/chat", createVercelApiRoute("/api/assistant/chat", dependencies)],
+    ]),
+    server = http.createServer((req, res) => {
+      const route = routes.get(new URL(req.url, "http://localhost").pathname);
+      if (route) return route(req, res);
+      res.writeHead(404).end();
+    });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const base = `http://127.0.0.1:${server.address().port}`,
+    health = await fetch(`${base}/api/assistant/status`);
+  assert.deepEqual(await health.json(), {
+    success: true,
+    status: "online",
+    configured: true,
+    model: "gemini-test",
+    stateless: true,
+  });
+
+  const sessionResponse = await fetch(`${base}/api/assistant/session`, {
+      method: "POST",
+      headers: { origin: base, "content-type": "application/json" },
+      body: "{}",
+    }),
+    session = await sessionResponse.json(),
+    cookie = sessionResponse.headers.get("set-cookie").split(";")[0],
+    headers = {
+      origin: base,
+      cookie,
+      "content-type": "application/json",
+      "x-terralens-csrf": session.csrf,
+    },
+    datasetResponse = await fetch(`${base}/api/datasets`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        latitude: 14.5,
+        longitude: 121,
+        startYear: 2020,
+        endYear: 2022,
+        parameter: "T2M",
+      }),
+    }),
+    dataset = await datasetResponse.json();
+  assert.equal(datasetResponse.status, 200);
+
+  const chatResponse = await fetch(`${base}/api/assistant/chat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        datasetId: dataset.datasetId,
+        question: "Which year was hottest?",
+        chart,
+        history: [{ role: "user", text: "Tell me about these data." }],
+      }),
+    }),
+    answer = await chatResponse.json();
+  assert.equal(chatResponse.status, 200);
+  assert.match(answer.answer, /2022/);
+  assert.deepEqual(receivedHistory, [
+    { role: "user", text: "Tell me about these data." },
+  ]);
+  assert.equal(nasaFetches, 2, "chat refetches trusted NASA data instead of reading stored data");
+});
 test("chart context rejects client measurements and periods outside the verified dataset", () => {
   assert.throws(
     () => validateChart({ ...chart, values: [999] }, fixture()),

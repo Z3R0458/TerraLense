@@ -133,10 +133,12 @@ export function createAssistantChat() {
     availability();
     suggestions();
     try {
+      const history = items.slice(0, -1).slice(-8);
       const response = await askAssistant({
         datasetId: id,
         question,
         chart: captured.chart,
+        history,
         mode,
       });
       if (requestVersion !== version) return;

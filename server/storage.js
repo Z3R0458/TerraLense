@@ -7,7 +7,9 @@ const GENERATION_TTL_MS = 90_000;
 
 export class StorageUnavailableError extends Error {
   constructor() {
-    super("Shared assistant storage is unavailable. Please try again shortly.");
+    super(
+      "Shared assistant storage is unavailable. Check the Upstash Redis environment variables and connection.",
+    );
     this.name = "StorageUnavailableError";
     this.code = "STORAGE_UNAVAILABLE";
     this.status = 503;

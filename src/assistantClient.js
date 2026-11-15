@@ -69,12 +69,19 @@ export async function fetchVerifiedPowerData(parameters) {
     const session = await assistantSession();
     return await request("datasets", parameters, session.csrf);
   } catch (error) {
-    // Static-only installations retain NASA charts, with AI explicitly disabled.
-    if (error.code !== "BACKEND_UNAVAILABLE") throw error;
+    // NASA charts remain available even when the Vercel AI state store is down.
+    // The assistant itself still requires the backend and shared storage.
+    if (
+      !["BACKEND_UNAVAILABLE", "STORAGE_UNAVAILABLE", "AI_NOT_CONFIGURED"].includes(
+        error.code,
+      )
+    )
+      throw error;
     return {
       dataset: await fetchMonthlyPowerData(parameters),
       datasetId: null,
       backendUnavailable: true,
+      backendError: error.code,
     };
   }
 }
@@ -82,12 +89,19 @@ export async function askAssistant({
   datasetId,
   question,
   chart,
+  history = [],
   mode = "chat",
 }) {
   const session = await assistantSession();
   return request(
     "assistant/chat",
-    { datasetId, question, chart, mode },
+    {
+      datasetId,
+      question,
+      chart,
+      mode,
+      ...(session.stateless ? { history } : {}),
+    },
     session.csrf,
   );
 }
